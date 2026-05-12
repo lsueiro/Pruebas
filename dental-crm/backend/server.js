@@ -3,7 +3,7 @@ const cors = require('cors');
 const path = require('path');
 require('dotenv').config();
 
-const { sequelize } = require('./models');
+const { initializeDatabase } = require('./models');
 const routes = require('./routes');
 
 const app = express();
@@ -26,10 +26,10 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 // Database sync and server start
-const startServer = async () => {
+const startServer = () => {
   try {
-    await sequelize.sync({ force: false });
-    console.log('✅ Base de datos sincronizada');
+    initializeDatabase();
+    console.log('✅ Base de datos inicializada');
     
     app.listen(PORT, () => {
       console.log(`🚀 Servidor corriendo en puerto ${PORT}`);

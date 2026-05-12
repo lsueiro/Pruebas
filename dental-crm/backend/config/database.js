@@ -1,10 +1,10 @@
-const { Sequelize } = require('sequelize');
+const Database = require('better-sqlite3');
 const path = require('path');
 
-const sequelize = new Sequelize({
-  dialect: 'sqlite',
-  storage: path.join(__dirname, '../../database/dental_crm.sqlite'),
-  logging: false,
-});
+const dbPath = path.join(__dirname, '../../database/dental_crm.sqlite');
+const db = new Database(dbPath);
 
-module.exports = sequelize;
+// Enable foreign keys
+db.pragma('foreign_keys = ON');
+
+module.exports = db;

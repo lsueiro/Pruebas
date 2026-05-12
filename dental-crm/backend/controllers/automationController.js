@@ -1,241 +1,230 @@
-const { Automation, Client, Appointment } = require('../models');
-const { Op } = require('sequelize');
+const { db } = require('../models');
 
-exports.getAutomations = async (req, res) => {
+exports.getAutomations = (req, res) => {
   try {
-    const automations = await Automation.findAll({
-      where: { userId: req.user.id },
-      order: [['createdAt', 'DESC']],
-    });
+    const automations = db.prepare(`
+      SELECT * FROM automations WHERE user_id = ? ORDER BY created_at DESC
+    `).all(req.user.id);
+    
     res.json(automations);
   } catch (error) {
+    console.error('Get automations error:', error);
     res.status(500).json({ message: 'Error al obtener automatizaciones' });
   }
 };
 
-exports.createAutomation = async (req, res) => {
+exports.createAutomation = (req, res) => {
   try {
     const { type, name, enabled, triggerDays, message, channel } = req.body;
 
-    const automation = await Automation.create({
-      userId: req.user.id,
+    const result = db.prepare(`
+      INSERT INTO automations (user_id, type, enabled, config)
+      VALUES (?, ?, ?, ?)
+    `).run(
+      req.user.id,
       type,
-      name,
-      enabled: enabled !== false,
-      triggerDays,
-      message,
-      channel: channel || 'email',
-    });
+      enabled !== false,
+      JSON.stringify({ triggerDays, message, channel: channel || 'email', name })
+    );
 
+    const automation = db.prepare('SELECT * FROM automations WHERE id = ?').get(result.lastInsertRowid);
     res.status(201).json(automation);
   } catch (error) {
+    console.error('Create automation error:', error);
     res.status(500).json({ message: 'Error al crear automatización' });
   }
 };
 
-exports.updateAutomation = async (req, res) => {
+exports.updateAutomation = (req, res) => {
   try {
     const { type, name, enabled, triggerDays, message, channel } = req.body;
 
-    const automation = await Automation.findOne({
-      where: { id: req.params.id, userId: req.user.id },
-    });
+    const existing = db.prepare('SELECT * FROM automations WHERE id = ? AND user_id = ?')
+      .get(req.params.id, req.user.id);
 
-    if (!automation) {
+    if (!existing) {
       return res.status(404).json({ message: 'Automatización no encontrada' });
     }
 
-    await automation.update({
+    db.prepare(`
+      UPDATE automations SET type = ?, enabled = ?, config = ?
+      WHERE id = ? AND user_id = ?
+    `).run(
       type,
-      name,
-      enabled,
-      triggerDays,
-      message,
-      channel,
-    });
+      enabled !== false,
+      JSON.stringify({ triggerDays, message, channel: channel || 'email', name }),
+      req.params.id,
+      req.user.id
+    );
 
+    const automation = db.prepare('SELECT * FROM automations WHERE id = ?').get(req.params.id);
     res.json(automation);
   } catch (error) {
+    console.error('Update automation error:', error);
     res.status(500).json({ message: 'Error al actualizar automatización' });
   }
 };
 
-exports.deleteAutomation = async (req, res) => {
+exports.deleteAutomation = (req, res) => {
   try {
-    const automation = await Automation.findOne({
-      where: { id: req.params.id, userId: req.user.id },
-    });
+    const existing = db.prepare('SELECT * FROM automations WHERE id = ? AND user_id = ?')
+      .get(req.params.id, req.user.id);
 
-    if (!automation) {
+    if (!existing) {
       return res.status(404).json({ message: 'Automatización no encontrada' });
     }
 
-    await automation.destroy();
+    db.prepare('DELETE FROM automations WHERE id = ? AND user_id = ?')
+      .run(req.params.id, req.user.id);
+
     res.json({ message: 'Automatización eliminada' });
   } catch (error) {
+    console.error('Delete automation error:', error);
     res.status(500).json({ message: 'Error al eliminar automatización' });
   }
 };
 
-exports.runAutomations = async (req, res) => {
+exports.runAutomations = (req, res) => {
   try {
-    const automations = await Automation.findAll({
-      where: { userId: req.user.id, enabled: true },
-    });
-
+    const now = new Date();
     const results = {
-      reminders: [],
-      reactivations: [],
-      loyalty: [],
+      remindersSent: 0,
+      inactiveClientsFound: 0,
+      loyaltyCampaignsSent: 0,
     };
 
-    const today = new Date();
+    // Get all automations for user
+    const automations = db.prepare(`
+      SELECT * FROM automations WHERE user_id = ? AND enabled = 1
+    `).all(req.user.id);
 
-    for (const automation of automations) {
-      if (automation.type === 'reminder') {
-        const daysAhead = automation.triggerDays || 1;
-        const targetDate = new Date(today);
-        targetDate.setDate(targetDate.getDate() + daysAhead);
+    automations.forEach(automation => {
+      const config = JSON.parse(automation.config || '{}');
+      
+      if (automation.type === 'appointment_reminder') {
+        // Send reminders for appointments in next 24 hours
+        const tomorrow = new Date(now);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        
+        const upcomingAppointments = db.prepare(`
+          SELECT a.*, c.name, c.email, c.phone
+          FROM appointments a
+          JOIN clients c ON a.client_id = c.id
+          WHERE a.user_id = ? 
+          AND a.date_time >= ? 
+          AND a.date_time <= ?
+          AND a.reminder_sent = 0
+          AND a.status = 'scheduled'
+        `).all(req.user.id, now.toISOString(), tomorrow.toISOString());
 
-        const appointments = await Appointment.findAll({
-          where: {
-            userId: req.user.id,
-            date: {
-              [Op.gte]: new Date(targetDate.setHours(0, 0, 0, 0)),
-              [Op.lt]: new Date(targetDate.setHours(23, 59, 59, 999)),
-            },
-            status: ['scheduled', 'confirmed'],
-            reminderSent: false,
-          },
-          include: [{ model: Client, as: 'client' }],
+        upcomingAppointments.forEach(apt => {
+          // Mark reminder as sent
+          db.prepare('UPDATE appointments SET reminder_sent = 1 WHERE id = ?').run(apt.id);
+          results.remindersSent++;
+          console.log(`Reminder sent to ${apt.name} for appointment on ${apt.date_time}`);
         });
-
-        results.reminders.push(...appointments.map(apt => ({
-          clientId: apt.clientId,
-          clientName: apt.client.name,
-          appointmentDate: apt.date,
-          message: automation.message || `Recordatorio: Tienes una cita mañana a las ${new Date(apt.date).toLocaleTimeString()}`,
-        })));
       }
+      
+      if (automation.type === 'inactive_client_recovery') {
+        const daysThreshold = config.triggerDays || 90;
+        const thresholdDate = new Date(now);
+        thresholdDate.setDate(thresholdDate.getDate() - daysThreshold);
+        
+        const inactiveClients = db.prepare(`
+          SELECT * FROM clients 
+          WHERE user_id = ? 
+          AND status != 'inactive'
+          AND (last_visit IS NULL OR last_visit < ?)
+        `).all(req.user.id, thresholdDate.toISOString());
 
-      if (automation.type === 'reactivation') {
-        const daysInactive = automation.triggerDays || 90;
-        const cutoffDate = new Date(today);
-        cutoffDate.setDate(cutoffDate.getDate() - daysInactive);
-
-        const inactiveClients = await Client.findAll({
-          where: {
-            userId: req.user.id,
-            lastVisit: {
-              [Op.lt]: cutoffDate,
-            },
-            status: 'inactive',
-          },
+        inactiveClients.forEach(client => {
+          // Update client status and set next suggested contact
+          const nextContact = new Date(now);
+          nextContact.setDate(nextContact.getDate() + 7);
+          
+          db.prepare(`
+            UPDATE clients SET status = 'inactive', next_suggested_contact = ?
+            WHERE id = ?
+          `).run(nextContact.toISOString(), client.id);
+          
+          results.inactiveClientsFound++;
+          console.log(`Inactive client identified: ${client.name}`);
         });
-
-        results.reactivations.push(...inactiveClients.map(client => ({
-          clientId: client.id,
-          clientName: client.name,
-          lastVisit: client.lastVisit,
-          message: automation.message || `¡Te extrañamos! Ha pasado tiempo desde tu última visita. Agenda tu cita hoy y recibe un 10% de descuento.`,
-        })));
       }
+      
+      if (automation.type === 'loyalty_campaign') {
+        // Find recurrent clients for loyalty campaign
+        const loyalClients = db.prepare(`
+          SELECT c.*, COUNT(a.id) as appointment_count
+          FROM clients c
+          LEFT JOIN appointments a ON c.id = a.client_id
+          WHERE c.user_id = ? 
+          AND c.status = 'recurrent'
+          GROUP BY c.id
+          HAVING COUNT(a.id) >= 3
+        `).all(req.user.id);
 
-      if (automation.type === 'loyalty') {
-        const loyalClients = await Client.findAll({
-          where: {
-            userId: req.user.id,
-            totalVisits: { [Op.gte]: automation.triggerDays || 5 },
-            status: 'recurrent',
-          },
+        loyalClients.forEach(client => {
+          results.loyaltyCampaignsSent++;
+          console.log(`Loyalty campaign triggered for: ${client.name}`);
         });
-
-        results.loyalty.push(...loyalClients.map(client => ({
-          clientId: client.id,
-          clientName: client.name,
-          totalVisits: client.totalVisits,
-          message: automation.message || `¡Gracias por tu lealtad! Como cliente frecuente, tienes acceso a beneficios exclusivos.`,
-        })));
       }
-    }
+    });
 
-    res.json(results);
+    // Update last_run for all automations
+    automations.forEach(automation => {
+      db.prepare('UPDATE automations SET last_run = ? WHERE id = ?')
+        .run(now.toISOString(), automation.id);
+    });
+
+    res.json({ success: true, results });
   } catch (error) {
+    console.error('Run automations error:', error);
     res.status(500).json({ message: 'Error al ejecutar automatizaciones' });
   }
 };
 
-exports.getClientContactSuggestions = async (req, res) => {
+exports.getClientContactSuggestions = (req, res) => {
   try {
-    const clients = await Client.findAll({
-      where: { userId: req.user.id },
-      include: [{
-        model: Appointment,
-        as: 'appointments',
-        limit: 1,
-        order: [['date', 'DESC']],
-      }],
-    });
+    const now = new Date();
+    
+    // Clients who need follow-up
+    const needsContact = db.prepare(`
+      SELECT c.*, 
+        CASE 
+          WHEN c.next_suggested_contact <= ? THEN 'Follow-up needed'
+          WHEN c.last_visit IS NULL THEN 'New client - initial contact'
+          ELSE 'Regular check-in'
+        END as contact_reason
+      FROM clients c
+      WHERE c.user_id = ?
+      AND (c.next_suggested_contact <= ? OR c.last_visit IS NULL)
+      ORDER BY c.next_suggested_contact ASC
+    `).all(now.toISOString(), req.user.id, now.toISOString());
 
-    const today = new Date();
-    const suggestions = [];
+    // Upcoming birthdays or special dates (if stored in preferences)
+    const specialDates = db.prepare(`
+      SELECT c.*, c.preferences
+      FROM clients c
+      WHERE c.user_id = ? 
+      AND c.preferences IS NOT NULL
+    `).all(req.user.id);
 
-    for (const client of clients) {
-      const lastAppointment = client.appointments[0];
-      const lastVisit = client.lastVisit ? new Date(client.lastVisit) : null;
-      
-      let reason = null;
-      let priority = 'low';
-      let contactDate = null;
-
-      if (client.status === 'inactive' && lastVisit) {
-        const daysSinceLastVisit = Math.floor((today - lastVisit) / (1000 * 60 * 60 * 24));
-        if (daysSinceLastVisit > 90) {
-          reason = 'Cliente inactivo por más de 90 días';
-          priority = 'high';
-          contactDate = new Date(today);
+    const suggestions = {
+      needsContact,
+      specialDates: specialDates.filter(c => {
+        try {
+          const prefs = JSON.parse(c.preferences);
+          return prefs.birthday || prefs.anniversary;
+        } catch {
+          return false;
         }
-      }
-
-      if (lastAppointment && lastAppointment.date) {
-        const nextCheckup = new Date(lastAppointment.date);
-        nextCheckup.setMonth(nextCheckup.getMonth() + 6);
-        
-        if (nextCheckup <= today && client.status !== 'inactive') {
-          reason = 'Es hora de su revisión semestral';
-          priority = 'medium';
-          contactDate = nextCheckup;
-        }
-      }
-
-      if (client.totalVisits >= 5 && client.status === 'recurrent') {
-        reason = 'Cliente frecuente - ofrecer programa de fidelización';
-        priority = 'medium';
-        contactDate = new Date(today);
-      }
-
-      if (reason) {
-        suggestions.push({
-          clientId: client.id,
-          clientName: client.name,
-          clientEmail: client.email,
-          clientPhone: client.phone,
-          reason,
-          priority,
-          contactDate,
-          status: client.status,
-          totalVisits: client.totalVisits,
-        });
-      }
-    }
-
-    suggestions.sort((a, b) => {
-      const priorityOrder = { high: 0, medium: 1, low: 2 };
-      return priorityOrder[a.priority] - priorityOrder[b.priority];
-    });
+      }),
+    };
 
     res.json(suggestions);
   } catch (error) {
-    res.status(500).json({ message: 'Error al obtener sugerencias de contacto' });
+    console.error('Get suggestions error:', error);
+    res.status(500).json({ message: 'Error al obtener sugerencias' });
   }
 };

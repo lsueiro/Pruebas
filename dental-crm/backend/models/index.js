@@ -1,42 +1,135 @@
-const sequelize = require('../config/database');
-const User = require('./User');
-const Client = require('./Client');
-const Appointment = require('./Appointment');
-const Service = require('./Service');
-const Treatment = require('./Treatment');
-const Automation = require('./Automation');
+const db = require('../config/database');
 
-// Associations
-User.hasMany(Client, { foreignKey: 'userId', as: 'clients' });
-Client.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+// Initialize database tables
+function initializeDatabase() {
+  // Users table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      role TEXT DEFAULT 'owner',
+      clinic_name TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
 
-User.hasMany(Appointment, { foreignKey: 'userId', as: 'appointments' });
-Appointment.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+  // Clients table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS clients (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      email TEXT,
+      phone TEXT NOT NULL,
+      status TEXT DEFAULT 'new',
+      last_visit DATE,
+      next_suggested_contact DATE,
+      preferences TEXT,
+      notes TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+  `);
 
-Client.hasMany(Appointment, { foreignKey: 'clientId', as: 'appointments' });
-Appointment.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
+  // Appointments table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS appointments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      client_id INTEGER NOT NULL,
+      date_time DATETIME NOT NULL,
+      duration INTEGER DEFAULT 60,
+      status TEXT DEFAULT 'scheduled',
+      service_type TEXT,
+      notes TEXT,
+      reminder_sent BOOLEAN DEFAULT FALSE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (client_id) REFERENCES clients(id)
+    )
+  `);
 
-User.hasMany(Service, { foreignKey: 'userId', as: 'services' });
-Service.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+  // Services table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS services (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      price REAL,
+      duration INTEGER DEFAULT 60,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+  `);
 
-Client.hasMany(Treatment, { foreignKey: 'clientId', as: 'treatments' });
-Treatment.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
+  // Treatments table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS treatments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      client_id INTEGER NOT NULL,
+      appointment_id INTEGER,
+      service_id INTEGER,
+      user_id INTEGER NOT NULL,
+      date_performed DATE,
+      notes TEXT,
+      price REAL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (client_id) REFERENCES clients(id),
+      FOREIGN KEY (appointment_id) REFERENCES appointments(id),
+      FOREIGN KEY (service_id) REFERENCES services(id),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+  `);
 
-Appointment.hasMany(Treatment, { foreignKey: 'appointmentId', as: 'treatments' });
-Treatment.belongsTo(Appointment, { foreignKey: 'appointmentId', as: 'appointment' });
+  // Automations table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS automations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      enabled BOOLEAN DEFAULT TRUE,
+      config TEXT,
+      last_run DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+  `);
 
-Service.hasMany(Treatment, { foreignKey: 'serviceId', as: 'treatments' });
-Treatment.belongsTo(Service, { foreignKey: 'serviceId', as: 'service' });
+  // Create default services
+  const defaultServices = [
+    { name: 'Limpieza Dental', description: 'Limpieza profesional y pulido', price: 80, duration: 60 },
+    { name: 'Blanqueamiento', description: 'Blanqueamiento dental profesional', price: 250, duration: 90 },
+    { name: 'Ortodoncia', description: 'Evaluación y tratamiento de ortodoncia', price: 150, duration: 45 },
+    { name: 'Implantes', description: 'Implantes dentales', price: 800, duration: 120 },
+    { name: 'Endodoncia', description: 'Tratamiento de conducto', price: 300, duration: 90 },
+    { name: 'Extracción', description: 'Extracción dental', price: 100, duration: 45 },
+  ];
 
-User.hasMany(Automation, { foreignKey: 'userId', as: 'automations' });
-Automation.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+  const stmt = db.prepare(`
+    INSERT OR IGNORE INTO services (name, description, price, duration, user_id)
+    VALUES (?, ?, ?, ?, 1)
+  `);
+
+  defaultServices.forEach(service => {
+    stmt.run(service.name, service.description, service.price, service.duration);
+  });
+
+  // Create default admin user (password: admin123)
+  const bcrypt = require('bcryptjs');
+  const hashedPassword = bcrypt.hashSync('admin123', 10);
+  
+  db.exec(`
+    INSERT OR IGNORE INTO users (name, email, password, role, clinic_name)
+    VALUES ('Administrador', 'admin@dentalcrm.com', '${hashedPassword}', 'owner', 'Clínica Dental Demo')
+  `);
+
+  console.log('Database initialized successfully!');
+}
 
 module.exports = {
-  sequelize,
-  User,
-  Client,
-  Appointment,
-  Service,
-  Treatment,
-  Automation,
+  db,
+  initializeDatabase,
 };

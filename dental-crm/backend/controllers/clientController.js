@@ -1,165 +1,179 @@
-const { Client, Appointment, Treatment } = require('../models');
-const { Op } = require('sequelize');
+const { db } = require('../models');
 
-exports.getClients = async (req, res) => {
+exports.getClients = (req, res) => {
   try {
     const { status, search } = req.query;
-    const where = { userId: req.user.id };
-    
+    let query = `
+      SELECT c.*, 
+        (SELECT COUNT(*) FROM appointments a WHERE a.client_id = c.id AND a.user_id = ?) as appointment_count,
+        (SELECT MAX(date_time) FROM appointments a WHERE a.client_id = c.id AND a.user_id = ?) as last_appointment
+      FROM clients c WHERE c.user_id = ?
+    `;
+    const params = [req.user.id, req.user.id, req.user.id];
+
     if (status) {
-      where.status = status;
-    }
-    
-    if (search) {
-      where[Op.or] = [
-        { name: { [Op.iLike]: `%${search}%` } },
-        { email: { [Op.iLike]: `%${search}%` } },
-        { phone: { [Op.iLike]: `%${search}%` } },
-      ];
+      query += ' AND c.status = ?';
+      params.push(status);
     }
 
-    const clients = await Client.findAll({
-      where,
-      include: [{
-        model: Appointment,
-        as: 'appointments',
-        limit: 1,
-        order: [['date', 'DESC']],
-      }],
-      order: [['createdAt', 'DESC']],
-    });
+    if (search) {
+      query += ' AND (c.name LIKE ? OR c.email LIKE ? OR c.phone LIKE ?)';
+      const searchTerm = `%${search}%`;
+      params.push(searchTerm, searchTerm, searchTerm);
+    }
+
+    query += ' ORDER BY c.created_at DESC';
+
+    const clients = db.prepare(query).all(...params);
 
     res.json(clients);
   } catch (error) {
+    console.error('Get clients error:', error);
     res.status(500).json({ message: 'Error al obtener clientes' });
   }
 };
 
-exports.getClient = async (req, res) => {
+exports.getClient = (req, res) => {
   try {
-    const client = await Client.findOne({
-      where: { id: req.params.id, userId: req.user.id },
-      include: [
-        {
-          model: Appointment,
-          as: 'appointments',
-          order: [['date', 'DESC']],
-        },
-        {
-          model: Treatment,
-          as: 'treatments',
-          order: [['createdAt', 'DESC']],
-        },
-      ],
-    });
+    const client = db.prepare(`
+      SELECT * FROM clients WHERE id = ? AND user_id = ?
+    `).get(req.params.id, req.user.id);
 
     if (!client) {
       return res.status(404).json({ message: 'Cliente no encontrado' });
     }
 
-    res.json(client);
+    // Get appointments
+    const appointments = db.prepare(`
+      SELECT * FROM appointments WHERE client_id = ? ORDER BY date_time DESC
+    `).all(req.params.id);
+
+    // Get treatments
+    const treatments = db.prepare(`
+      SELECT t.*, s.name as service_name 
+      FROM treatments t
+      LEFT JOIN services s ON t.service_id = s.id
+      WHERE t.client_id = ? 
+      ORDER BY t.created_at DESC
+    `).all(req.params.id);
+
+    res.json({ ...client, appointments, treatments });
   } catch (error) {
+    console.error('Get client error:', error);
     res.status(500).json({ message: 'Error al obtener cliente' });
   }
 };
 
-exports.createClient = async (req, res) => {
+exports.createClient = (req, res) => {
   try {
     const { name, email, phone, notes, preferences } = req.body;
 
-    const client = await Client.create({
-      userId: req.user.id,
+    const result = db.prepare(`
+      INSERT INTO clients (user_id, name, email, phone, notes, preferences, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'new')
+    `).run(
+      req.user.id,
       name,
-      email,
+      email || null,
       phone,
-      notes,
-      preferences: preferences || {},
-    });
+      notes || null,
+      JSON.stringify(preferences || {})
+    );
 
+    const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(result.lastInsertRowid);
     res.status(201).json(client);
   } catch (error) {
+    console.error('Create client error:', error);
     res.status(500).json({ message: 'Error al crear cliente' });
   }
 };
 
-exports.updateClient = async (req, res) => {
+exports.updateClient = (req, res) => {
   try {
-    const { name, email, phone, status, notes, preferences } = req.body;
+    const { name, email, phone, status, notes, preferences, last_visit, next_suggested_contact } = req.body;
 
-    const client = await Client.findOne({
-      where: { id: req.params.id, userId: req.user.id },
-    });
+    const existing = db.prepare('SELECT * FROM clients WHERE id = ? AND user_id = ?')
+      .get(req.params.id, req.user.id);
 
-    if (!client) {
+    if (!existing) {
       return res.status(404).json({ message: 'Cliente no encontrado' });
     }
 
-    await client.update({
+    db.prepare(`
+      UPDATE clients SET
+        name = ?, email = ?, phone = ?, status = ?, notes = ?, 
+        preferences = ?, last_visit = ?, next_suggested_contact = ?
+      WHERE id = ? AND user_id = ?
+    `).run(
       name,
       email,
       phone,
       status,
       notes,
-      preferences,
-    });
+      JSON.stringify(preferences || {}),
+      last_visit,
+      next_suggested_contact,
+      req.params.id,
+      req.user.id
+    );
 
+    const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(req.params.id);
     res.json(client);
   } catch (error) {
+    console.error('Update client error:', error);
     res.status(500).json({ message: 'Error al actualizar cliente' });
   }
 };
 
-exports.deleteClient = async (req, res) => {
+exports.deleteClient = (req, res) => {
   try {
-    const client = await Client.findOne({
-      where: { id: req.params.id, userId: req.user.id },
-    });
+    const existing = db.prepare('SELECT * FROM clients WHERE id = ? AND user_id = ?')
+      .get(req.params.id, req.user.id);
 
-    if (!client) {
+    if (!existing) {
       return res.status(404).json({ message: 'Cliente no encontrado' });
     }
 
-    await client.destroy();
+    db.prepare('DELETE FROM clients WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
     res.json({ message: 'Cliente eliminado' });
   } catch (error) {
+    console.error('Delete client error:', error);
     res.status(500).json({ message: 'Error al eliminar cliente' });
   }
 };
 
-exports.getStats = async (req, res) => {
+exports.getStats = (req, res) => {
   try {
-    const newClients = await Client.count({
-      where: { userId: req.user.id, status: 'new' },
-    });
+    const newClients = db.prepare(`
+      SELECT COUNT(*) as count FROM clients WHERE user_id = ? AND status = 'new'
+    `).get(req.user.id).count;
 
-    const recurrentClients = await Client.count({
-      where: { userId: req.user.id, status: 'recurrent' },
-    });
+    const recurrentClients = db.prepare(`
+      SELECT COUNT(*) as count FROM clients WHERE user_id = ? AND status = 'recurrent'
+    `).get(req.user.id).count;
 
-    const inactiveClients = await Client.count({
-      where: { userId: req.user.id, status: 'inactive' },
-    });
+    const inactiveClients = db.prepare(`
+      SELECT COUNT(*) as count FROM clients WHERE user_id = ? AND status = 'inactive'
+    `).get(req.user.id).count;
 
-    const totalClients = await Client.count({
-      where: { userId: req.user.id },
-    });
+    const totalClients = db.prepare(`
+      SELECT COUNT(*) as count FROM clients WHERE user_id = ?
+    `).get(req.user.id).count;
 
-    const totalRevenue = await Treatment.sum('price', {
-      include: [{
-        model: Client,
-        as: 'client',
-        where: { userId: req.user.id },
-      }],
-    });
+    const totalRevenue = db.prepare(`
+      SELECT COALESCE(SUM(price), 0) as total FROM treatments 
+      WHERE client_id IN (SELECT id FROM clients WHERE user_id = ?)
+    `).get(req.user.id).total;
 
     res.json({
       newClients,
       recurrentClients,
       inactiveClients,
       totalClients,
-      totalRevenue: totalRevenue || 0,
+      totalRevenue,
     });
   } catch (error) {
+    console.error('Get stats error:', error);
     res.status(500).json({ message: 'Error al obtener estadísticas' });
   }
 };
